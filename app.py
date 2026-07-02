@@ -10,7 +10,7 @@ st.set_page_config(page_title="SCR催化剂专家", page_icon="🧪", layout="wi
 
 # ---------- 简单密码登录配置 ----------
 # ⚠️ 请修改为你想用的密码！
-PASSWORD = "scr2024"  # 比如 "scr123456"
+PASSWORD = os.environ.get('APP_PASSWORD', '请设置密码')  # 比如 "scr123456"
 
 def check_password():
     """验证密码"""
