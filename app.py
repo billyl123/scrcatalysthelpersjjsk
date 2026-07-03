@@ -7,6 +7,17 @@ from supabase import create_client, Client
 
 # ---------- 页面配置 ----------
 st.set_page_config(page_title="SCR催化剂专家", page_icon="🧪", layout="wide")
+# ---------- 隐藏右上角 GitHub 链接 ----------
+st.markdown(
+    """
+    <style>
+        .stApp header a[href*="github.com"] {
+            display: none !important;
+        }
+    </style>
+    """,
+    unsafe_allow_html=True
+)
 
 # ---------- 初始化 Supabase 客户端 ----------
 supabase: Client = create_client(
