@@ -3,71 +3,121 @@ from openai import OpenAI
 import os
 import json
 from datetime import datetime
-import hashlib
+from supabase import create_client, Client
 
 # ---------- 页面配置 ----------
 st.set_page_config(page_title="SCR催化剂专家", page_icon="🧪", layout="wide")
 
-# ---------- 简单密码登录配置 ----------
-# ⚠️ 请修改为你想用的密码！
-PASSWORD = os.environ.get('APP_PASSWORD', '请设置密码')  # 比如 "scr123456"
-
-def check_password():
-    """验证密码"""
-    if "authenticated" not in st.session_state:
-        st.session_state.authenticated = False
-    
-    if not st.session_state.authenticated:
-        st.title("🔐 SCR催化剂智能助手")
-        st.markdown("请输入密码以继续使用")
-        
-        password_input = st.text_input("密码", type="password", placeholder="请输入密码")
-        
-        if st.button("登录", use_container_width=True):
-            if password_input == PASSWORD:
-                st.session_state.authenticated = True
-                st.rerun()
-            else:
-                st.error("❌ 密码错误，请重试")
-        
-        st.caption("内部使用 · 请联系管理员获取密码")
-        return False
-    
-    return True
+# ---------- 初始化 Supabase 客户端 ----------
+supabase: Client = create_client(
+    st.secrets["SUPABASE_URL"],
+    st.secrets["SUPABASE_KEY"]
+)
 
 # ---------- 初始化 OpenAI 客户端 ----------
 client = OpenAI(
-    api_key=os.environ.get('DEEPSEEK_API_KEY'),
+    api_key=st.secrets["DEEPSEEK_API_KEY"],
     base_url="https://api.deepseek.com"
 )
 
-# ---------- 会话管理 ----------
-SESSION_DIR = "sessions"
-if not os.path.exists(SESSION_DIR):
-    os.makedirs(SESSION_DIR)
+# ---------- 用户登录/注册 ----------
+def init_auth():
+    if "user" not in st.session_state:
+        st.session_state.user = None
 
+    if st.session_state.user is None:
+        st.title("🔐 SCR催化剂智能助手")
+        tab1, tab2 = st.tabs(["登录", "注册"])
+        
+        with tab1:
+            email = st.text_input("邮箱", key="login_email")
+            password = st.text_input("密码", type="password", key="login_password")
+            if st.button("登录"):
+                try:
+                    resp = supabase.auth.sign_in_with_password({
+                        "email": email, "password": password
+                    })
+                    user = resp.user
+                    # 获取用户角色
+                    profile_resp = supabase.table("user_profiles").select("role").eq("user_id", user.id).execute()
+                    if profile_resp.data:
+                        role = profile_resp.data[0]["role"]
+                    else:
+                        role = "user"  # 默认普通用户
+                    st.session_state.user = {
+                        "id": user.id,
+                        "email": user.email,
+                        "role": role
+                    }
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"登录失败: {e}")
+
+        with tab2:
+            new_email = st.text_input("邮箱", key="reg_email")
+            new_password = st.text_input("密码", type="password", key="reg_password")
+            if st.button("注册"):
+                try:
+                    resp = supabase.auth.sign_up({
+                        "email": new_email, "password": new_password
+                    })
+                    user = resp.user
+                    # 默认角色为 'user'
+                    supabase.table("user_profiles").insert({
+                        "user_id": user.id,
+                        "email": user.email,
+                        "role": "user"
+                    }).execute()
+                    st.success("注册成功，请返回登录")
+                except Exception as e:
+                    st.error(f"注册失败: {e}")
+        return False
+    else:
+        return True
+
+# ---------- 会话管理（数据库版）----------
 def get_all_sessions():
-    files = [f for f in os.listdir(SESSION_DIR) if f.endswith('.json')]
-    files.sort(key=lambda f: os.path.getmtime(os.path.join(SESSION_DIR, f)), reverse=True)
-    return files
+    user = st.session_state.user
+    if user["role"] == "admin":
+        # 管理员：查询所有记录
+        resp = supabase.table("chat_sessions").select("*").order("created_at", desc=True).execute()
+    else:
+        # 普通用户：只查自己的
+        resp = supabase.table("chat_sessions").select("*").eq("user_id", user["id"]).order("created_at", desc=True).execute()
+    return resp.data
 
 def load_session(session_id):
-    filepath = os.path.join(SESSION_DIR, f"{session_id}.json")
-    if os.path.exists(filepath):
-        with open(filepath, 'r', encoding='utf-8') as f:
-            return json.load(f)
+    resp = supabase.table("chat_sessions").select("*").eq("session_id", session_id).execute()
+    if resp.data:
+        return resp.data[0]
     return None
 
 def save_session(session_id, messages, title):
+    user = st.session_state.user
     data = {
+        "user_id": user["id"],
+        "user_email": user["email"],
         "session_id": session_id,
         "title": title,
-        "updated_at": datetime.now().isoformat(),
-        "messages": messages
+        "messages": json.dumps(messages, ensure_ascii=False)  # 转成 JSON 字符串
     }
-    filepath = os.path.join(SESSION_DIR, f"{session_id}.json")
-    with open(filepath, 'w', encoding='utf-8') as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    # 如果该 session_id 已存在，则更新；否则插入
+    existing = supabase.table("chat_sessions").select("id").eq("session_id", session_id).execute()
+    if existing.data:
+        supabase.table("chat_sessions").update(data).eq("session_id", session_id).execute()
+    else:
+        supabase.table("chat_sessions").insert(data).execute()
+
+def delete_session(session_id):
+    supabase.table("chat_sessions").delete().eq("session_id", session_id).execute()
+
+def delete_all_sessions():
+    user = st.session_state.user
+    if user["role"] == "admin":
+        # 管理员可以删除全部（谨慎）
+        supabase.table("chat_sessions").delete().neq("id", 0).execute()  # 删除所有
+    else:
+        supabase.table("chat_sessions").delete().eq("user_id", user["id"]).execute()
 
 def generate_title(messages):
     for msg in messages:
@@ -76,51 +126,55 @@ def generate_title(messages):
             return title + "..." if len(msg["content"]) > 30 else title
     return "新对话"
 
-# ---------- 主程序 ----------
-def main():
-    # 检查登录状态
-    if not check_password():
-        return
-    
-    # ---------- 侧边栏 ----------
+# ---------- 侧边栏 ----------
+def render_sidebar():
     with st.sidebar:
+        st.sidebar.success(f"👤 {st.session_state.user['email']} ({st.session_state.user['role']})")
+        if st.button("🚪 退出登录", use_container_width=True):
+            st.session_state.user = None
+            st.rerun()
+
         st.header("📜 历史对话")
-        
+
         if st.button("➕ 新建对话", use_container_width=True):
             st.session_state.messages = [{"role": "assistant", "content": "你好！我是SCR催化剂专家。请问有什么可以帮您？😊"}]
             st.session_state.current_session = None
-        
+
         sessions = get_all_sessions()
-        
+
         if not sessions:
             st.info("暂无历史对话")
         else:
-            for file in sessions:
-                session_id = file.replace('.json', '')
-                data = load_session(session_id)
-                if data:
-                    title = data.get("title", "未命名")
-                    if st.button(f"💬 {title}", key=session_id, use_container_width=True):
-                        st.session_state.messages = data["messages"]
-                        st.session_state.current_session = session_id
-        
+            for sess in sessions:
+                title = sess.get("title", "未命名")
+                session_id = sess["session_id"]
+                # 如果是管理员，显示记录来自哪个用户
+                if st.session_state.user["role"] == "admin" and sess.get("user_email"):
+                    display_title = f"{title} ({sess['user_email']})"
+                else:
+                    display_title = title
+                if st.button(f"💬 {display_title}", key=session_id, use_container_width=True):
+                    st.session_state.messages = json.loads(sess["messages"])
+                    st.session_state.current_session = session_id
+
         st.divider()
         if st.button("🗑️ 清空所有历史", use_container_width=True):
-            for file in sessions:
-                os.remove(os.path.join(SESSION_DIR, file))
+            delete_all_sessions()
             st.session_state.messages = [{"role": "assistant", "content": "你好！我是SCR催化剂专家。请问有什么可以帮您？😊"}]
             st.session_state.current_session = None
-        
-        # 显示退出登录按钮
-        if st.button("🚪 退出登录", use_container_width=True):
-            st.session_state.authenticated = False
             st.rerun()
+
+# ---------- 主程序 ----------
+def main():
+    if not init_auth():
+        return
+
+    render_sidebar()
 
     # ---------- 主界面 ----------
     st.title("🧪 SCR脱硝催化剂智能助手")
     st.caption("SCR 催化剂智能助手 | 内部使用")
 
-    # ---------- 初始化 ----------
     if "messages" not in st.session_state:
         st.session_state.messages = [{"role": "assistant", "content": "你好！我是SCR催化剂专家。请问有什么可以帮您？😊"}]
     if "current_session" not in st.session_state:
@@ -155,11 +209,13 @@ def main():
                 st.write(reply)
                 st.session_state.messages.append({"role": "assistant", "content": reply})
 
+                # 自动保存
                 title = generate_title(st.session_state.messages)
                 if st.session_state.current_session is None:
-                    session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    session_id = datetime.now().strftime("%Y%m%d_%H%M%S") + "_" + str(hash(title))[:6]
                     st.session_state.current_session = session_id
                 save_session(st.session_state.current_session, st.session_state.messages, title)
+                st.rerun()
 
 if __name__ == "__main__":
     main()
