@@ -112,16 +112,25 @@ def save_session(session_id, messages, title):
         "title": title,
         "messages": json.dumps(messages, ensure_ascii=False)
     }
+    
+    # 调试信息：打印数据，看看是否正确
+    print(f"[DEBUG] 准备保存数据: {data}")
+
     try:
+        # 检查是否已存在
         existing = supabase.table("chat_sessions").select("id").eq("session_id", session_id).execute()
         if existing.data:
             supabase.table("chat_sessions").update(data).eq("session_id", session_id).execute()
+            st.success("会话已更新！")  # 临时提示
         else:
             supabase.table("chat_sessions").insert(data).execute()
+            st.success("新会话已保存！")  # 临时提示
     except Exception as e:
+        # 显示具体错误
         st.error(f"保存会话失败: {e}")
-        # 可选：将错误详情也打印到日志（但云端可能看不到）
-        print(f"ERROR: {e}")
+        # 显示更详细的错误体（如果是APIError）
+        if hasattr(e, 'body'):
+            st.error(f"详细错误: {e.body}")
 
 def delete_session(session_id):
     supabase.table("chat_sessions").delete().eq("session_id", session_id).execute()
